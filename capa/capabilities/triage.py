@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 REASON_DEFAULT = "analyze"
 REASON_LIBRARY = "library/flirt function"
 REASON_CRT_NAME = "crt/runtime function name pattern"
+REASON_COMPILER_RUNTIME = "compiler runtime function name pattern"
 REASON_TINY_NO_API = "tiny function without API evidence"
 REASON_THUNK = "thunk-like function"
 REASON_RUNTIME_SECTION = "runtime section pattern"
@@ -46,6 +47,106 @@ CRT_NAME_PREFIXES = (
     "__imp_",
     "_imp__",
 )
+
+# Compiler family runtime function name prefixes organized by toolchain.
+# Matching is always case-insensitive (see _looks_like_compiler_runtime_name).
+# Used to identify boilerplate/runtime functions that should be skipped during analysis.
+COMPILER_FAMILY_PREFIXES: dict[str, tuple[str, ...]] = {
+    "gcc": (
+        "__do_global_dtors_aux",
+        "frame_dummy",
+        "register_tm_clones",
+        "deregister_tm_clones",
+        "call_gmon_start",
+        "_init_tls",
+        "__mingw_invalidParameterHandler",
+        "__gcc_personality_v0",
+        "__cyg_profile_func_enter",
+        "__cyg_profile_func_exit",
+        "_start",
+        "__libc_csu_init",
+        "__libc_csu_fini",
+        "__libc_start_main",
+        "_dl_start",
+        "_Jv_RegisterClasses",
+        "__x86.get_pc_thunk.",
+        "__i686.get_pc_thunk.",
+        "__mingw_raise_matherr",
+        "__mingw_vfprintf",
+        "__mingw_vsnprintf",
+        "__mingw_vsscanf",
+        "__mingw_vsprintf",
+        "__mingw_fprintf",
+        "__seh_filter_dll",
+        "__seh_filter_exe",
+        "__report_gsfailure",
+        "__tmainCRTStartup",
+        "_tmainCRTStartup",
+        "__mingw_app_type",
+        "__getmainargs",
+        "_getmainargs",
+    ),
+    "clang": (
+        "__cxa_atexit",
+        "__cxa_finalize",
+        "__cxa_throw",
+        "__cxa_rethrow",
+        "__cxa_begin_catch",
+        "__cxa_end_catch",
+        "__cxa_call_unexpected",
+        "__cxa_pure_virtual",
+        "__cxa_deleted_virtual",
+        "__cxa_guard_acquire",
+        "__cxa_guard_release",
+        "__cxa_guard_abort",
+        "__cxa_demangle",
+        "__cxa_allocate_exception",
+        "__cxa_free_exception",
+        "__stack_chk_fail",
+        "__stack_chk_guard",
+        "__ubsan_handle_",
+        "__asan_",
+        "__tsan_",
+        "__msan_",
+        "__hwasan_",
+        "__sanitizer_",
+        "__lsan_",
+        "llvm.lifetime.",
+        "llvm.dbg.",
+        "llvm.memcpy",
+        "llvm.memset",
+        "__clang_call_terminate",
+    ),
+    "rust": (
+        "rust_begin_unwind",
+        "rust_panic",
+        "__rust_alloc",
+        "__rust_dealloc",
+        "__rust_realloc",
+        "__rust_alloc_zeroed",
+        "__rust_alloc_error_handler",
+        "core::panicking::",
+        "std::panicking::",
+        "core::fmt::",
+        "std::alloc::",
+        "std::rt::",
+    ),
+    "go": (
+        "runtime.mallocgc",
+        "runtime.gcAssistAlloc",
+        "runtime.morestack",
+        "runtime.newproc",
+        "runtime.goexit",
+        "runtime.gopanic",
+        "runtime.gorecover",
+        "runtime.efaceOf",
+        "runtime.convT",
+        "runtime.deferreturn",
+        "runtime.mstart",
+        "runtime.schedinit",
+        "runtime.main",
+    ),
+}
 
 RUNTIME_SECTION_NAMES = {
     ".init",
@@ -72,9 +173,24 @@ class TriageResult:
     reason: str = REASON_DEFAULT
 
 
-def _looks_like_runtime_name(name: str) -> bool:
+def _looks_like_msvc_crt_name(name: str) -> bool:
+    """Return True if *name* matches MSVC CRT prefix patterns only."""
     lname = name.lower()
     return lname.startswith(CRT_NAME_PREFIXES) or lname.startswith("j_") or lname.startswith("nullsub_")
+
+
+def _looks_like_compiler_runtime_name(name: str) -> bool:
+    """Return True if *name* matches any compiler-family runtime prefix (non-MSVC)."""
+    lname = name.lower()
+    for prefixes in COMPILER_FAMILY_PREFIXES.values():
+        if lname.startswith(tuple(p.lower() for p in prefixes)):
+            return True
+    return False
+
+
+def _looks_like_runtime_name(name: str) -> bool:
+    """Combined check: return True if the name looks like any known runtime/boilerplate function."""
+    return _looks_like_msvc_crt_name(name) or _looks_like_compiler_runtime_name(name)
 
 
 def _get_function_name(extractor: StaticFeatureExtractor, fh: FunctionHandle) -> str:
@@ -162,8 +278,10 @@ def classify_function(extractor: StaticFeatureExtractor, fh: FunctionHandle) -> 
     if not has_api and (is_thunk or section_name in RUNTIME_SECTION_NAMES or (name and bb_count <= 1 and insn_count <= 4)):
         has_api = _has_api_feature_evidence(extractor, fh)
 
-    if name and _looks_like_runtime_name(name):
+    if name and _looks_like_msvc_crt_name(name):
         result = TriageResult(TriageDecision.SKIP, REASON_CRT_NAME)
+    elif name and not has_api and _looks_like_compiler_runtime_name(name):
+        result = TriageResult(TriageDecision.SKIP, REASON_COMPILER_RUNTIME)
     elif is_thunk and not has_api:
         result = TriageResult(TriageDecision.SKIP, REASON_THUNK)
     elif section_name in RUNTIME_SECTION_NAMES and not has_api and insn_count <= 8:

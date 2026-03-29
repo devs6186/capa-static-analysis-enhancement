@@ -16,6 +16,7 @@ from capa.features.insn import API
 from capa.features.address import AbsoluteVirtualAddress
 from capa.capabilities.triage import (
     REASON_CRT_NAME,
+    REASON_COMPILER_RUNTIME,
     REASON_LARGE_COMPLEXITY,
     REASON_TINY_NO_API,
     TriageDecision,
@@ -141,5 +142,58 @@ def test_triage_api_feature_evidence_prevents_thunk_skip():
     )
     fh = FunctionHandle(AbsoluteVirtualAddress(0x404000), FakeFunction())
 
+    result = classify_function(extractor, fh)
+    assert result.decision == TriageDecision.ANALYZE
+
+
+def test_triage_gcc_runtime_name_skip():
+    """GCC boilerplate functions should be skipped."""
+    for name in ["__do_global_dtors_aux", "frame_dummy", "register_tm_clones",
+                 "deregister_tm_clones", "call_gmon_start"]:
+        extractor = FakeTriageExtractor(
+            names={0x401000: name},
+            function_data={0x401000: {"bbs": {0x401000: [(0x401000, "ret")]}}},
+        )
+        fh = FunctionHandle(AbsoluteVirtualAddress(0x401000), FakeFunction())
+        result = classify_function(extractor, fh)
+        assert result.decision == TriageDecision.SKIP, f"{name} should be SKIP"
+
+
+def test_triage_clang_runtime_name_skip():
+    """Clang/LLVM runtime functions should be skipped."""
+    for name in ["__cxa_atexit", "__cxa_finalize", "__stack_chk_fail"]:
+        extractor = FakeTriageExtractor(
+            names={0x401000: name},
+            function_data={0x401000: {"bbs": {0x401000: [(0x401000, "ret")]}}},
+        )
+        fh = FunctionHandle(AbsoluteVirtualAddress(0x401000), FakeFunction())
+        result = classify_function(extractor, fh)
+        assert result.decision == TriageDecision.SKIP, f"{name} should be SKIP"
+
+
+def test_triage_go_runtime_name_skip():
+    """Go runtime functions should be skipped."""
+    for name in ["runtime.mallocgc", "runtime.morestack", "runtime.goexit"]:
+        extractor = FakeTriageExtractor(
+            names={0x401000: name},
+            function_data={0x401000: {"bbs": {0x401000: [(0x401000, "ret")]}}},
+        )
+        fh = FunctionHandle(AbsoluteVirtualAddress(0x401000), FakeFunction())
+        result = classify_function(extractor, fh)
+        assert result.decision == TriageDecision.SKIP, f"{name} should be SKIP"
+
+
+def test_triage_compiler_runtime_does_not_skip_with_api():
+    """Compiler runtime names with API evidence should still be ANALYZE."""
+    extractor = FakeTriageExtractor(
+        names={0x401000: "frame_dummy"},
+        function_data={
+            0x401000: {
+                "bbs": {0x401000: [(0x401000, "call"), (0x401001, "ret")]},
+                "insn_features": {0x401000: [API("kernel32.CreateFileA")]},
+            }
+        },
+    )
+    fh = FunctionHandle(AbsoluteVirtualAddress(0x401000), FakeFunction())
     result = classify_function(extractor, fh)
     assert result.decision == TriageDecision.ANALYZE
